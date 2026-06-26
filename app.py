@@ -3,16 +3,15 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import io
 import warnings
 from dataclasses import dataclass
-from typing import List, Tuple
-from datetime import datetime, timedelta
+from typing import List
+from datetime import datetime
 
 warnings.filterwarnings('ignore')
 
 # ============================================================================
-# DATA CLASSES & BACKEND LOGIC (Your exact Python logic from previous steps)
+# DATA CLASSES & BACKEND LOGIC
 # ============================================================================
 
 @dataclass
@@ -104,13 +103,28 @@ class XAUUSDSignalGenerator:
 
     def load_csv(self, file_buffer, sep=';'):
         df = pd.read_csv(file_buffer, sep=sep)
-        df.columns = df.columns.str.strip()
-        col_map = {col: col.lower() for col in df.columns if col.lower() in ['date', 'time', 'datetime', 'timestamp']}
-        df = df.rename(columns=col_map)
-        date_col = 'date' if 'date' in df.columns else df.columns[0]
+        
+        # CRITICAL FIX: Strip spaces and convert ALL columns to lowercase
+        df.columns = df.columns.str.strip().str.lower()
+        
+        # Find the date column automatically
+        date_candidates = ['timestamp', 'date', 'time', 'datetime']
+        date_col = None
+        for candidate in date_candidates:
+            if candidate in df.columns:
+                date_col = candidate
+                break
+                
+        if not date_col:
+            date_col = df.columns[0] # Fallback to first column
+            
         df['timestamp'] = pd.to_datetime(df[date_col])
+        
+        # Convert OHLCV to numeric
         for c in ['open', 'high', 'low', 'close', 'volume']:
-            if c in df.columns: df[c] = pd.to_numeric(df[c], errors='coerce')
+            if c in df.columns: 
+                df[c] = pd.to_numeric(df[c], errors='coerce')
+                
         df = df.sort_values('timestamp').reset_index(drop=True)
         self.df = df
         return df
@@ -158,17 +172,41 @@ class XAUUSDSignalGenerator:
         signals = []
         for idx in range(start_idx, end_idx):
             if np.isnan(df['ema_slow'].iloc[idx]): continue
-            score = self.calculate_score(idx)
             
-            buy_conds = sum([score > 40, df['rsi'].iloc[idx] < self.rsi_overbought, df['close'].iloc[idx] > df['support_1'].iloc[idx], df['close'].iloc[idx] > df['bb_lower'].iloc[idx]])
-            sell_conds = sum([score < -40, df['rsi'].iloc[idx] > self.rsi_oversold, df['close'].iloc[idx] < df['resistance_1'].iloc[idx], df['close'].iloc[idx] < df['bb_upper'].iloc[idx]])
+            score = self.calculate_score(idx)
+            rsi_val = df['rsi'].iloc[idx] if not np.isnan(df['rsi'].iloc[idx]) else 50
+            
+            buy_conds = sum([
+                score > 40, 
+                rsi_val < self.rsi_overbought, 
+                df['close'].iloc[idx] > df['support_1'].iloc[idx], 
+                df['close'].iloc[idx] > df['bb_lower'].iloc[idx]
+            ])
+            sell_conds = sum([
+                score < -40, 
+                rsi_val > self.rsi_oversold, 
+                df['close'].iloc[idx] < df['resistance_1'].iloc[idx], 
+                df['close'].iloc[idx] < df['bb_upper'].iloc[idx]
+            ])
             
             if buy_conds >= 3 and score > 30:
                 atr_val = df['atr'].iloc[idx] if not np.isnan(df['atr'].iloc[idx]) else 5
-                signals.append(Signal(df['timestamp'].iloc[idx], 'BUY', df['close'].iloc[idx], score, buy_conds, df['close'].iloc[idx] - (atr_val*self.atr_mult_sl), df['close'].iloc[idx] + (atr_val*self.atr_mult_tp), atr_val, df['rsi'].iloc[idx], df['macd_line'].iloc[idx], df['bb_percent_b'].iloc[idx], df['vol_ratio'].iloc[idx], 'BULL', df['support_1'].iloc[idx], df['resistance_1'].iloc[idx]))
+                signals.append(Signal(
+                    df['timestamp'].iloc[idx], 'BUY', df['close'].iloc[idx], score, buy_conds, 
+                    df['close'].iloc[idx] - (atr_val*self.atr_mult_sl), 
+                    df['close'].iloc[idx] + (atr_val*self.atr_mult_tp), 
+                    atr_val, rsi_val, df['macd_line'].iloc[idx], df['bb_percent_b'].iloc[idx], 
+                    df['vol_ratio'].iloc[idx], 'BULL', df['support_1'].iloc[idx], df['resistance_1'].iloc[idx]
+                ))
             elif sell_conds >= 3 and score < -30:
                 atr_val = df['atr'].iloc[idx] if not np.isnan(df['atr'].iloc[idx]) else 5
-                signals.append(Signal(df['timestamp'].iloc[idx], 'SELL', df['close'].iloc[idx], score, sell_conds, df['close'].iloc[idx] + (atr_val*self.atr_mult_sl), df['close'].iloc[idx] - (atr_val*self.atr_mult_tp), atr_val, df['rsi'].iloc[idx], df['macd_line'].iloc[idx], df['bb_percent_b'].iloc[idx], df['vol_ratio'].iloc[idx], 'BEAR', df['support_1'].iloc[idx], df['resistance_1'].iloc[idx]))
+                signals.append(Signal(
+                    df['timestamp'].iloc[idx], 'SELL', df['close'].iloc[idx], score, sell_conds, 
+                    df['close'].iloc[idx] + (atr_val*self.atr_mult_sl), 
+                    df['close'].iloc[idx] - (atr_val*self.atr_mult_tp), 
+                    atr_val, rsi_val, df['macd_line'].iloc[idx], df['bb_percent_b'].iloc[idx], 
+                    df['vol_ratio'].iloc[idx], 'BEAR', df['support_1'].iloc[idx], df['resistance_1'].iloc[idx]
+                ))
         self.signals = signals
         return signals
 
@@ -195,14 +233,40 @@ class XAUUSDSignalGenerator:
 
 st.set_page_config(page_title="Kronos XAUUSD", page_icon="⏳", layout="wide")
 
-# Custom CSS for Dark Theme (Similar to TradingView/Kronos style)
+# Custom CSS for Dark Theme & WHITE LABELS
 st.markdown("""
 <style>
-    .main { background-color: #0e1117; color: white; }
+    /* Background Colors */
+    .main { background-color: #0e1117; }
     .sidebar { background-color: #1a1a2e; }
-    div.stButton > button:first-child { background-color: #e6b422; color: black; font-weight: bold; }
-    div.stButton > button:hover { background-color: #ffd700; }
     section[data-testid="stSidebar"] { background-color: #1a1a2e; }
+    
+    /* Force ALL Text and Labels to be White */
+    p, h1, h2, h3, h4, h5, h6, li, label, span {
+        color: white !important;
+    }
+    
+    /* Specific Streamlit Widget Labels */
+    .stNumberLabel, .stSelectboxLabel, .stSliderLabel, .stFileUploadLabel {
+        color: white !important;
+        font-weight: bold;
+    }
+    
+    /* Metric Box Labels (Top text) and Values (Big numbers) */
+    .stMetricLabel { color: #ffffff !important; }
+    .stMetricValue { color: #ffffff !important; }
+    
+    /* Dataframe Text */
+    th { color: white !important; }
+    td { color: #d1d5db !important; }
+    
+    /* Keep Button Text Black for contrast */
+    div.stButton > button:first-child { 
+        background-color: #e6b422; 
+        color: black !important; 
+        font-weight: bold; 
+    }
+    div.stButton > button:hover { background-color: #ffd700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -281,7 +345,7 @@ if uploaded_file and run_btn:
             col4.metric("Trend Bias", prediction['trend'])
             
         # --- PLOT INTERACTIVE CHART ---
-        st.header("📊 10-Day Chart & Signals")
+        st.header("📊 Chart & Signals (Last 7 Days)")
         # We only plot the testing window so the browser doesn't crash on 1m data
         chart_df = gen.df.iloc[start_idx:].copy()
         
